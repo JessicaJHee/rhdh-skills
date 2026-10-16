@@ -4,28 +4,30 @@ Companion diagram for [`SKILL.md`](../SKILL.md). Render in GitHub, GitLab, VS Co
 
 ## Overview
 
-One flow: **backstage/backstage** at the **`backstage.json`** release tag produces **`dist/`**; **RHDH** pins that onto the **lockfile version** with **`yarn patch`**. Upstream SHAs are cherry-picked onto that tag when needed.
+One flow: **backstage/backstage** at the **`backstage.json`** release tag is built **twice** (before and after the fix). **Only** dist files that differ between those builds are copied into the Yarn patch temp. **RHDH** pins that minimal set onto the lockfile version.
 
 ```mermaid
 flowchart TB
   subgraph repos["Repos"]
     direction LR
-    U(["backstage/backstage<br/><i>checkout v from RHDH backstage.json; optional cherry-pick; yarn build → dist/</i>"])
-    R(["redhat-developer/rhdh<br/>release-V<br/><i>read backstage.json; yarn why/patch/patch-commit; verify resolutions</i>"])
+    U(["backstage/backstage<br/><i>checkout v from backstage.json; baseline build; cherry-pick; patched build; diff dist</i>"])
+    R(["redhat-developer/rhdh<br/>release-V<br/><i>yarn patch; copy only changed dist files; patch-commit</i>"])
   end
 
   subgraph work["Workflow"]
     direction TB
-    P[Pre-flight: clean trees, map git remotes] --> S1[Sync RHDH → release-V; read backstage.json version]
-    S1 --> S2[Fetch tags; checkout vVERSION on disposable branch]
-    S2 --> S3{Bring fix onto tag}
-    S3 -->|Upstream SHAs| CP[cherry-pick or skip if already in tag]
-    S3 -->|manual edits| ME[direct changes in code]
-    CP --> B[yarn build per package/plugin to generate dist/]
-    ME --> B
-    B --> RHDH[yarn why → yarn patch @npm:VERSION → copy dist → patch-commit]
+    P[Pre-flight: clean trees, map git remotes] --> S1[Sync RHDH → release-V; read backstage.json]
+    S1 --> S2[Fetch tags; checkout vVERSION]
+    S2 --> B0[yarn build → DIST_BASELINE]
+    B0 --> S3{Apply fix}
+    S3 -->|Upstream SHAs| CP[cherry-pick onto tag]
+    S3 -->|manual edits| ME[edit src/]
+    CP --> B1[yarn build → DIST_PATCHED]
+    ME --> B1
+    B1 --> D[diff baseline vs patched; exclude *.map]
+    D --> RHDH[yarn patch → copy only changed files → patch-commit]
     RHDH --> I[yarn install]
-    I --> V[Verify yarn.lock + yarn why to confirm patch application]
+    I --> V[Verify minimal .patch + yarn why via patch:]
   end
 ```
 

@@ -3,13 +3,13 @@ name: rhdh-patch-backstage
 description: >-
   Backports Backstage fixes into an RHDH release-* line without bumping published
   @backstage/* versions by checking out the Backstage release tag from RHDH's
-  backstage.json in a local backstage/backstage clone, building package dist/,
-  and generating Yarn patches under .yarn/patches with resolutions and lockfile
-  updates in redhat-developer/rhdh (root and/or dynamic-plugins/). Use for
-  "patch-backstage", "yarn patch this Backstage commit", "backport a CVE fix
-  into release-1.9 with yarn patches", or building dist from the backstage.json
-  tag onto the lockfile version. Not for cherry-picking an rhdh-plugins pull
-  request onto a plugin release branch.
+  backstage.json in a local backstage/backstage clone, building package dist/
+  before and after the fix, and generating a minimal Yarn patch (only dist files
+  that differ) under .yarn/patches with resolutions and lockfile updates in
+  redhat-developer/rhdh (root and/or dynamic-plugins/). Use for "patch-backstage",
+  "yarn patch this Backstage commit", "backport a CVE fix into release-1.9 with
+  yarn patches", or a minimal dist patch from the backstage.json tag. Not for
+  cherry-picking an rhdh-plugins pull request onto a plugin release branch.
 compatibility: "git, yarn (Berry), Node on PATH; gh when opening PRs; clean checkouts of redhat-developer/rhdh and backstage/backstage."
 ---
 
@@ -88,17 +88,28 @@ cd <RHDH_ROOT> && HUSKY=0 git fetch <RHDH_CORE_REMOTE> release-<V> && HUSKY=0 gi
 
 ## Dist baseline
 
-- **`yarn patch`** overlays **`dist/`** on the **version RHDH already resolves** (lockfile), so **`PACKAGE_VERSION`** must come from **`yarn why`**, not from “what Backstage released.”
-- **Compile** on **backstage/backstage** at **`BACKSTAGE_TAG`** (plus any cherry-picks). That tag is the release RHDH declares in **`backstage.json`**.
+- **`yarn patch`** overlays files on the **version RHDH already resolves** (lockfile), so **`PACKAGE_VERSION`** must come from **`yarn why`**, not from “what Backstage released.”
+- **Compile** on **backstage/backstage** at **`BACKSTAGE_TAG`**, then again after the fix. The Yarn patch must contain **only** files that differ between those two local builds (the SHA / manual change)—never a wholesale **`dist/`** replace.
 - **Do not** use **redhat-developer/backstage** **`patch/release-*`** as the build tree.
+
+## Minimal patch rule (required)
+
+Copying an entire rebuilt **`dist/`** into the Yarn patch temp pulls rebuild noise (sourcemaps, key reorder in **`.d.ts`**, toolchain path diffs). That produced oversized patches such as [rhdh@3e2c6fff](https://github.com/redhat-developer/rhdh/commit/3e2c6fff9ce2f36988bd44a89752ec63b01c0ec2) (~1.2k lines for a two-file SignInPage fix).
+
+**Always:**
+
+1. Build at **`BACKSTAGE_TAG`** → **`DIST_BASELINE`**.
+2. Apply **`COMMITS`** / manual edits; rebuild → **`DIST_PATCHED`**.
+3. Diff the two trees; copy **only** changed runtime artifacts into the Yarn patch temp (default: exclude **`*.map`**).
+4. Abort and ask if the changed-file list is large or unrelated to the source paths from the SHA / manual edit.
 
 ## Workflow (overview)
 
 1. **Pre-flight:** Clean trees and remotes; set **`RHDH_CORE_REMOTE`**, **`BACKSTAGE_REMOTE`**.
 2. **RHDH:** **`HUSKY=0`** fetch/checkout/pull **`release-<RHDH_VERSION>`**; read **`BACKSTAGE_VERSION`** / **`BACKSTAGE_TAG`** from **`backstage.json`**.
-3. **Backstage:** Fetch tags + **`master`**; check out **`BACKSTAGE_TAG`** on a disposable work branch; **pre-check**; cherry-pick **or** patch-only; **`yarn build`** per **`PACKAGES`** (**`cd` + `yarn build`**, not root **`yarn workspace … build`**).
-4. **RHDH:** Remove stale **`.patch`** + **`resolutions`** for targets; **`yarn why`** → versions; **`yarn patch`** / replace **`dist`** / **`patch-commit`**; **clean up `resolutions`**; **`yarn install`** (root and **`dynamic-plugins/`** as needed).
-5. **Verify:** **`@patch:`** in each relevant **`yarn.lock`**; **`yarn why`** shows **`via patch:`**; commit artifacts.
+3. **Backstage:** Fetch tags + **`master`**; check out **`BACKSTAGE_TAG`**; **baseline build** → save **`DIST_BASELINE`**; **pre-check**; cherry-pick **or** patch-only; **patched build**; **diff dist trees**.
+4. **RHDH:** Remove stale **`.patch`** + **`resolutions`** for targets; **`yarn why`** → versions; **`yarn patch`**; copy **only** diffed files; **`patch-commit`**; **clean up `resolutions`**; **`yarn install`**.
+5. **Verify:** patch file is minimal; **`@patch:`** in each relevant **`yarn.lock`**; **`yarn why`** shows **`via patch:`**; commit artifacts.
 
 Commits, pushes, and pull requests are external writes. Follow **`/mutation-gate`** with each repository and branch as the target (`rhdh:release-1.9`). Preview the artifact set before asking to commit or open a PR. Do not push the disposable Backstage work branch unless the user asks.
 
@@ -139,18 +150,60 @@ For each SHA in **`COMMITS`** (oldest first):
 
 ### 2.3 Patch-only vs ask
 
-- **Proceed** without extra confirmation if the user already asked for **yarn patches** for **`COMMITS`** on this **`release-*`**: empty pre-check → go to **2.5 Build** and RHDH Steps 3–5; note in the **Final summary** that cherry-pick was skipped.
+- **Proceed** without extra confirmation if the user already asked for **yarn patches** for **`COMMITS`** on this **`release-*`**: empty pre-check and no manual edits → stop (nothing to patch); note that in the **Final summary**.
+- If they still want a patch despite an empty pre-check, ask why (the tag already has the fix).
 - **Ask** if intent is vague (“sync Backstage” only).
 
-### 2.4 Cherry-pick (when pre-check was non-empty)
+### 2.4 Baseline build (before the fix)
+
+On **`rhdh-patch/<BACKSTAGE_TAG>`** at the clean tag tip (no cherry-picks yet), for each package in **`PACKAGES`**:
+
+```bash
+cd <BACKSTAGE_ROOT>/<plugins|packages>/<id> && yarn build \
+  && rm -rf /tmp/rhdh-patch-baseline/<pkg-name> \
+  && mkdir -p /tmp/rhdh-patch-baseline \
+  && cp -a dist /tmp/rhdh-patch-baseline/<pkg-name>
+```
+
+If **`dist-types`** or build fails: Backstage repo root **`yarn install`** / **`yarn tsc`**, then retry. Record **`DIST_BASELINE=<pkg>`** = **`/tmp/rhdh-patch-baseline/<pkg-name>`**.
+
+When the pre-check was empty (fix already in the tag) and there are no manual edits, stop—there is nothing to patch.
+
+### 2.5 Cherry-pick (when pre-check was non-empty)
 
 **`git cherry-pick <SHA>`** (oldest first) onto **`rhdh-patch/<BACKSTAGE_TAG>`**.
 
 **Conflicts:** Prefer the **cherry-picked commit’s** content for conflicted **`src/`** (during cherry-pick, **`git checkout --theirs -- <path>`** refers to that commit). If fixing conflicts would drop the functional fix, or conflicts are only **changelog/version** noise you should not merge, **`git cherry-pick --abort`**, note it in the **Final summary**, and coordinate with the user.
 
-### 2.5 Build **`PACKAGES`**
+For **manual edits** instead of SHAs: edit **`src/`** on this branch after the baseline build, then continue.
 
-For each package: **`cd`** **`plugins/<id>/`** or **`packages/<id>/`** → **`yarn build`**. If **`dist-types`** or build fails: Backstage repo root **`yarn install`** / **`yarn tsc`**, then retry per-package **`yarn build`**.
+### 2.6 Patched build + dist diff
+
+For each package: **`cd`** package → **`yarn build`** again. Then list files that differ from the baseline (**exclude sourcemaps by default**):
+
+```bash
+PKG_DIR=<BACKSTAGE_ROOT>/<plugins|packages>/<id>
+BASE=/tmp/rhdh-patch-baseline/<pkg-name>
+OUT=/tmp/rhdh-patch-changed-<pkg-name>.txt
+: > "$OUT"
+# Changed files present on both sides (skip *.map)
+diff -rq "$BASE" "$PKG_DIR/dist" | grep ' differ$' | grep -v '\.map' | while IFS= read -r line; do
+  left=${line#Files }
+  left=${left%% and *}
+  printf '%s\n' "${left#"$BASE"/}"
+done >> "$OUT"
+# Added under patched dist
+diff -rq "$BASE" "$PKG_DIR/dist" | grep "^Only in $PKG_DIR/dist" | grep -v '\.map' | while IFS= read -r line; do
+  rest=${line#Only in }
+  dir=${rest%%: *}
+  name=${rest#*: }
+  printf '%s\n' "${dir#"$PKG_DIR/dist"/}/$name" | sed 's#^/##'
+done >> "$OUT"
+sort -u "$OUT" -o "$OUT"
+cat "$OUT"
+```
+
+**Sanity check:** The relative paths should map to the **`src/`** files from **`COMMITS`** / the manual edit (e.g. `SignInPage.tsx` → `layout/SignInPage/SignInPage.esm.js`). If dozens of unrelated files appear, the baseline was wrong or the build is non-deterministic—**stop and ask**; do not copy the whole tree.
 
 ## Step 3: Prepare RHDH
 
@@ -159,19 +212,27 @@ For each package: **`cd`** **`plugins/<id>/`** or **`packages/<id>/`** → **`ya
 1. Remove prior **`.patch`** files and matching **`resolutions`** entries for the packages you are refreshing (search **both** root and **`dynamic-plugins/package.json`**).
 2. **`yarn why @backstage/<pkg>`** from **RHDH root**; if empty, run from **`dynamic-plugins/`**. Record **PACKAGE_VERSION** for Step 4.
 
-## Step 4: Generate patches
+## Step 4: Generate patches (minimal file set)
 
 Run from **RHDH root** or **`dynamic-plugins/`** depending on where the dependency resolves.
 
-**Temp folder:** Each **`yarn patch …`** prints a **new** path—use it immediately for **`rm`**, **`cp`**, **`yarn patch-commit -s`** (same shell or paste path). Do not reuse an old temp.
+**Temp folder:** Each **`yarn patch …`** prints a **new** path—use it immediately. Do not reuse an old temp.
 
 **Per package:**
 
-1. **`yarn patch <package>@npm:<PACKAGE_VERSION>`**
-2. **`rm -rf <PATCH_TEMP>/dist`** && **`cp -r <BACKSTAGE_ROOT>/<plugins|packages>/.../dist <PATCH_TEMP>/dist`**
-3. **`yarn patch-commit -s <PATCH_TEMP>`** in that workspace.
+1. **`yarn patch <package>@npm:<PACKAGE_VERSION>`** → **`PATCH_TEMP`**.
+2. **Do not** **`rm -rf <PATCH_TEMP>/dist`** or copy the entire built **`dist/`**.
+3. For each relative path in **`/tmp/rhdh-patch-changed-<pkg-name>.txt`**:
 
-If a package resolves in **both** trees at the **same** version, patch **both** places (or mirror the **`patch:`** resolution into **`dynamic-plugins/package.json`** and run **`yarn install`** there too).
+   ```bash
+   cp "$PKG_DIR/dist/$rel" "$PATCH_TEMP/dist/$rel"
+   ```
+
+   Create parent dirs in **`PATCH_TEMP`** if a new file was added.
+4. **`yarn patch-commit -s <PATCH_TEMP>`** in that workspace.
+5. **Inspect** the new **`.yarn/patches/*.patch`**: it must list only the intended paths (typically a handful of **`.js`** / **`.d.ts`** under the changed feature). If it is dominated by **`*.map`** or unrelated modules, delete it and redo Step 2.4–4.
+
+If a package resolves in **both** trees at the **same** version, apply the **same minimal file set** in both places (or mirror the **`patch:`** resolution into **`dynamic-plugins/package.json`** and run **`yarn install`** there too).
 
 ### After **`yarn patch-commit`** (cleanup — required)
 
@@ -197,22 +258,25 @@ Incomplete until every patched package shows a **patch locator** in **`yarn.lock
 
 A run is complete when:
 
-1. Links: `https://github.com/backstage/backstage/commit/<SHA>` for each **`COMMITS`** entry (or “manual dist / no SHAs”).
+1. Links: `https://github.com/backstage/backstage/commit/<SHA>` for each **`COMMITS`** entry (or “manual edits / no SHAs”).
 2. **`BACKSTAGE_TAG`** / tip commit from **`backstage.json`**; **`PACKAGES`**, patch locations (root vs **`dynamic-plugins/`**), notable **`resolutions`** keys.
-3. Cherry-pick skipped vs applied; conflicts/aborts if any.
-4. RHDH PR intent (or “not opened”).
-5. **`RHDH_VERSION`**.
-6. Every patched package shows **`@patch:`** / **`via patch:`** in the relevant **`yarn.lock`** and **`yarn why`**.
+3. The list of copied dist relative paths (from the baseline↔patched diff), and confirmation the **`.patch`** file contains only those paths.
+4. Cherry-pick skipped vs applied; conflicts/aborts if any.
+5. RHDH PR intent (or “not opened”).
+6. **`RHDH_VERSION`**.
+7. Every patched package shows **`@patch:`** / **`via patch:`** in the relevant **`yarn.lock`** and **`yarn why`**.
 
 ## Safety
 
 - Do not invent a **`backstage.json`** version or a tag that does not exist on **backstage/backstage**.
 - No blind conflict resolution on cherry-picks; no push of the disposable Backstage work branch unless the user asks.
+- Never commit a Yarn patch that replaces an entire **`dist/`** or is mostly **`*.map`** / unrelated modules.
 
 ## Common issues
 
 | Symptom | What to do |
 |---------|------------|
+| Huge **`.patch`** (maps / whole dist) | Redo with baseline vs patched dist diff; copy only changed files; exclude **`*.map`** |
 | Wrong build tip | Re-read **`backstage.json`**, fetch tags, **`checkout -B rhdh-patch/<tag> <tag>`** |
 | Tag missing locally | **`git fetch <BACKSTAGE_REMOTE> --tags`** |
 | **`bad object`** on cherry-pick / show | **`git fetch <BACKSTAGE_REMOTE> master`** |
@@ -220,3 +284,4 @@ A run is complete when:
 | **`yarn why` / lockfile: no `@patch:`** | Remove bare semver **`resolutions`** for that pkg; use one **`patch:`** locator; drop wrong range keys; reinstall |
 | Build fails (missing types) | Backstage root **`yarn install`** / **`yarn tsc`**, then **`cd`** package **`yarn build`** |
 | Patch wrong version | Use **`yarn why`** version, not **`backstage.json`** meta-version |
+| Dist diff empty after cherry-pick | Confirm cherry-pick touched **`src/`** that this package builds; rebuild; check **`PACKAGES`** mapping |
