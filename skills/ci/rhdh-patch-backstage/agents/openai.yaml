@@ -1,0 +1,3 @@
+interface:
+  display_name: "RHDH Patch Backstage"
+  short_description: "Backport Backstage fixes into RHDH with Yarn patches"
