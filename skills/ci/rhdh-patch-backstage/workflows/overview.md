@@ -4,14 +4,15 @@ Companion diagram for [`SKILL.md`](../SKILL.md). Render in GitHub, GitLab, VS Co
 
 ## Overview
 
-One flow: **backstage/backstage** at the **`backstage.json`** release tag is built **twice** (before and after the fix). **Only** dist files that differ between those builds are copied into the Yarn patch temp. **RHDH** pins that minimal set onto the lockfile version.
+**backstage/backstage** at the **`backstage.json`** tag is built twice; only differing dist files become the Yarn patch in **rhdh**. The same **`src/`** fix must also land as a tracking PR on **redhat-developer/backstage** **`patch/release-V`**. That tracking PR is a **merge gate** for the RHDH PR.
 
 ```mermaid
 flowchart TB
   subgraph repos["Repos"]
     direction LR
-    U(["backstage/backstage<br/><i>checkout v from backstage.json; baseline build; cherry-pick; patched build; diff dist</i>"])
-    R(["redhat-developer/rhdh<br/>release-V<br/><i>yarn patch; copy only changed dist files; patch-commit</i>"])
+    U(["backstage/backstage<br/><i>build tree: tag + cherry-pick; baseline vs patched dist</i>"])
+    M(["redhat-developer/backstage<br/>patch/release-V<br/><i>tracking PR with same src/ fix — required before RHDH merge</i>"])
+    R(["redhat-developer/rhdh<br/>release-V<br/><i>minimal yarn patch; PR links maintenance PR</i>"])
   end
 
   subgraph work["Workflow"]
@@ -25,9 +26,12 @@ flowchart TB
     CP --> B1[yarn build → DIST_PATCHED]
     ME --> B1
     B1 --> D[diff baseline vs patched; exclude *.map]
-    D --> RHDH[yarn patch → copy only changed files → patch-commit]
-    RHDH --> I[yarn install]
-    I --> V[Verify minimal .patch + yarn why via patch:]
+    D --> T[Sync patch/release-V; same src/; open tracking PR]
+    T --> RHDH[yarn patch → copy only changed files → patch-commit]
+    RHDH --> I[yarn install + verify]
+    I --> G{Maintenance PR open or merged?}
+    G -->|yes| MOK[RHDH PR may merge]
+    G -->|no| BLOCK[Block RHDH merge]
   end
 ```
 
